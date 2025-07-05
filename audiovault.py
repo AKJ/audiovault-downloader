@@ -476,17 +476,31 @@ class AudioVaultDownloaderAsync:
     def check_and_prepare_dirs(self) -> None:
         while not self.download_dir.is_dir():
             print(f"Download directory does not exist: {self.download_dir}")
-            create = (
-                input(f"Create directory {self.download_dir}? (y/N): ").strip().lower()
-            )
-            if create == "y":
+            try:
+                create_directory_response = (
+                    input(f"Create directory {self.download_dir}? (y/N): ")
+                    .strip()
+                    .lower()
+                )
+            except KeyboardInterrupt:
+                print("\nExiting: Directory setup cancelled.")
+                sys.exit(0)
+            if create_directory_response == "y":
                 self.download_dir.mkdir(parents=True, exist_ok=True)
                 print("Directory created:", self.download_dir)
                 break
             else:
-                new_dir = input("Enter a different download directory: ").strip()
-                if new_dir:
-                    self.download_dir = Path(new_dir).expanduser().resolve()
+                try:
+                    alternative_directory = input(
+                        "Enter a different download directory: "
+                    ).strip()
+                except KeyboardInterrupt:
+                    print("\nExiting: Directory setup cancelled.")
+                    sys.exit(0)
+                if alternative_directory:
+                    self.download_dir = (
+                        Path(alternative_directory).expanduser().resolve()
+                    )
                     self.config.set_download_dir(self.download_dir)
                     self.movies_dir = self.download_dir / "movies"
                     self.tv_dir = self.download_dir / "tv"
@@ -538,42 +552,53 @@ class AudioVaultDownloaderAsync:
                 choice = int(input(f"{prompt} [1-{len(options)}]: "))
                 if 1 <= choice <= len(options):
                     return choice - 1
+            except KeyboardInterrupt:
+                print("\nExiting...")
+                sys.exit(0)
             except Exception:
                 pass
             print("Invalid input, try again.")
 
     def change_settings(self) -> None:
-        print("\nSettings:")
-        print(f"Current download directory: {self.download_dir}")
-        print(f"Current email: {self.config.get_email() or '(none)'}")
-        print("Leave blank to keep current value.")
-        d = input("New download directory: ").strip()
-        if d:
-            self.download_dir = Path(d).expanduser().resolve()
-            self.config.set_download_dir(self.download_dir)
-            self.movies_dir = self.download_dir / "movies"
-            self.tv_dir = self.download_dir / "tv"
-            self.check_and_prepare_dirs()
-        e = input("New email address: ").strip()
-        if e:
-            self.config.set_email(e)
-        # Password change logic
-        if (e or self.config.get_email()) and input(
-            "Update password? (y/N): "
-        ).strip().lower() == "y":
-            if self.auth:
-                self.auth.set_password_interactively(
-                    self.config.get_email() or e
-                )
-        print("Settings saved.\n")
+        try:
+            print("\nSettings:")
+            print(f"Current download directory: {self.download_dir}")
+            print(f"Current email: {self.config.get_email() or '(none)'}")
+            print("Leave blank to keep current value.")
+            download_directory = input("New download directory: ").strip()
+            if download_directory:
+                self.download_dir = Path(download_directory).expanduser().resolve()
+                self.config.set_download_dir(self.download_dir)
+                self.movies_dir = self.download_dir / "movies"
+                self.tv_dir = self.download_dir / "tv"
+                self.check_and_prepare_dirs()
+            email_address = input("New email address: ").strip()
+            if email_address:
+                self.config.set_email(email_address)
+            # Password change logic
+            if (email_address or self.config.get_email()) and input(
+                "Update password? (y/N): "
+            ).strip().lower() == "y":
+                if self.auth:
+                    self.auth.set_password_interactively(
+                        self.config.get_email() or email_address
+                    )
+            print("Settings saved.\n")
+        except KeyboardInterrupt:
+            print("\nSettings change cancelled.")
+            return
 
     async def handle_search(self, kind: str) -> None:
-        query = input(f"Search {kind} title: ").strip()
-        if not query:
-            print("Search cancelled.")
+        try:
+            search_query = input(f"Search {kind} title: ").strip()
+            if not search_query:
+                print("Search cancelled.")
+                return
+            entries = await self.search(search_query, kind)
+            await self.choose_and_download(entries, kind=kind)
+        except KeyboardInterrupt:
+            print("\nSearch cancelled.")
             return
-        entries = await self.search(query, kind)
-        await self.choose_and_download(entries, kind=kind)
 
     async def handle_recent(self, kind: str) -> None:
         entries = await self.get_recents(kind)
@@ -588,18 +613,22 @@ class AudioVaultDownloaderAsync:
         titles = [
             f"{i + 1}. {name} (ID: {id})" for i, (id, name, _) in enumerate(entries)
         ]
-        for t in titles:
-            print(t)
+        for title_with_number in titles:
+            print(title_with_number)
         print("Enter item numbers to download (separated by spaces). Blank to cancel.")
-        choice = input("Selection: ").strip()
-        if not choice:
+        try:
+            user_selection = input("Selection: ").strip()
+        except KeyboardInterrupt:
+            print("\nSelection cancelled.")
+            return
+        if not user_selection:
             return
         valid_indexes = []
-        for val in choice.split():
+        for value in user_selection.split():
             try:
-                idx = int(val) - 1
-                if 0 <= idx < len(entries):
-                    valid_indexes.append(idx)
+                index = int(value) - 1
+                if 0 <= index < len(entries):
+                    valid_indexes.append(index)
             except Exception:
                 continue
         if not valid_indexes:
