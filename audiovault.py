@@ -1,17 +1,16 @@
 import asyncio
-import aiohttp
-import async_timeout
+import httpx
 import getpass
 import keyring
 import sys
-import yaml
+import configparser
 import re
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-CONFIG_FILE = "config.yaml"
+CONFIG_FILE = "config.ini"
 DEFAULT_DOWNLOAD_DIR = "downloads"
 VERSION = "1.2-async"
 BASE_URL = "https://audiovault.net"
@@ -30,46 +29,56 @@ def bytes2human(n: int) -> str:
     return f"{n}B"
 
 
-class YAMLConfig:
+class ConfigManager:
+    """Configuration file management for application settings.
+
+    Handles reading, writing, and managing configuration data stored in INI format.
+    Provides convenient methods for accessing common settings like download directory
+    and email address.
+
+    Attributes:
+        filename: Path to the INI configuration file.
+        config: ConfigParser instance containing the configuration data.
+    """
+
     def __init__(self, filename: str = CONFIG_FILE):
         self.filename = Path(filename)
-        self.data: Dict[str, str] = {}
+        self.config = configparser.ConfigParser()
         self.read()
 
     def read(self) -> None:
         if self.filename.exists():
             try:
-                with self.filename.open("r", encoding="utf-8") as f:
-                    self.data = yaml.safe_load(f) or {}
+                self.config.read(self.filename, encoding="utf-8")
             except Exception as e:
                 print(f"Error reading config file: {e}")
-                self.data = {}
+                self.config = configparser.ConfigParser()
         else:
-            self.data = {}
+            # Create default section
+            self.config.add_section("settings")
 
     def write(self) -> None:
         with self.filename.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(self.data, f)
+            self.config.write(f)
 
-    def get(self, key: str, default=None):
-        return self.data.get(key, default)
+    def get(self, key: str, default=None) -> Optional[str]:
+        return self.config.get("settings", key, fallback=default)
 
     def set(self, key: str, value) -> None:
-        self.data[key] = str(value)
+        if not self.config.has_section("settings"):
+            self.config.add_section("settings")
+        self.config.set("settings", key, str(value))
         self.write()
 
     def get_download_dir(self) -> Path:
-        return (
-            Path(self.data.get("download_dir", DEFAULT_DOWNLOAD_DIR))
-            .expanduser()
-            .resolve()
-        )
+        dir_path = self.get("download_dir", DEFAULT_DOWNLOAD_DIR)
+        return Path(dir_path or DEFAULT_DOWNLOAD_DIR).expanduser().resolve()
 
     def set_download_dir(self, dir_path: Path) -> None:
         self.set("download_dir", str(dir_path.expanduser().resolve()))
 
     def get_email(self) -> Optional[str]:
-        return self.data.get("email")
+        return self.get("email")
 
     def set_email(self, email: str) -> None:
         self.set("email", email)
@@ -95,8 +104,8 @@ class AsyncLimiter:
 
 class AudioVaultDownloaderAsync:
     def __init__(self):
-        self.config = YAMLConfig()
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.config = ConfigManager()
+        self.client: Optional[httpx.AsyncClient] = None
         self.logged_in = False
         self.login_failures = 0
 
@@ -135,8 +144,8 @@ class AudioVaultDownloaderAsync:
         print(f"\nAudioVault.net Downloader v{VERSION}")
         print(f"All downloads will be stored in: {self.download_dir}")
         print()
-        async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar()) as session:
-            self.session = session
+        async with httpx.AsyncClient() as client:
+            self.client = client
             while True:
                 action = self.show_menu(
                     "Choose an action:",
@@ -247,23 +256,25 @@ class AudioVaultDownloaderAsync:
 
     async def login(self, email: str, password: str) -> bool:
         try:
-            async with self.session.get(f"{BASE_URL}/login") as resp:
-                text = await resp.text()
-                soup = BeautifulSoup(text, "html.parser")
-                token_tag = soup.find("input", {"name": "_token"})
-                if not isinstance(token_tag, Tag):
-                    print("Failed to get login token.")
-                    return False
-                token_value = token_tag.get("value")
-                if not token_value:
-                    print("Token element missing 'value' attribute.")
-                    return False
-                data = {"_token": token_value, "email": email, "password": password}
-            async with self.session.post(f"{BASE_URL}/login", data=data) as resp2:
-                t = await resp2.text()
-                if t.startswith("<form method="):
-                    return False
-                return True
+            if not self.client:
+                raise RuntimeError("Client not initialized")
+            resp = await self.client.get(f"{BASE_URL}/login")
+            text = resp.text
+            soup = BeautifulSoup(text, "html.parser")
+            token_tag = soup.find("input", {"name": "_token"})
+            if not isinstance(token_tag, Tag):
+                print("Failed to get login token.")
+                return False
+            token_value = token_tag.get("value")
+            if not token_value:
+                print("Token element missing 'value' attribute.")
+                return False
+            data = {"_token": token_value, "email": email, "password": password}
+            resp2 = await self.client.post(f"{BASE_URL}/login", data=data)
+            t = resp2.text
+            if t.startswith("<form method="):
+                return False
+            return True
         except Exception as e:
             print("Login error:", e)
             return False
@@ -356,31 +367,33 @@ class AudioVaultDownloaderAsync:
             status_dict[name] = "failed"
 
     async def search(self, query: str, kind: str) -> List[Tuple[str, str, str]]:
-        async with self.session.get(
-            f"{BASE_URL}/{kind}", params={"search": query}
-        ) as resp:
-            text = await resp.text()
-            return self.parse_table(text)
+        if not self.client:
+            raise RuntimeError("Client not initialized")
+        resp = await self.client.get(f"{BASE_URL}/{kind}", params={"search": query})
+        text = resp.text
+        return self.parse_table(text)
 
     async def get_recents(self, kind: str) -> List[Tuple[str, str, str]]:
-        async with self.session.get(BASE_URL) as resp:
-            text = await resp.text()
-            soup = BeautifulSoup(text, "html.parser")
-            h5_tags = soup.find_all("h5")
-            table: Optional[Tag] = None
-            for h5 in h5_tags:
-                if (
-                    h5.text.strip().startswith("Recent")
-                    and kind.capitalize() in h5.text
-                ):
-                    table_candidate = h5.find_next("tbody")
-                    if isinstance(table_candidate, Tag):
-                        table = table_candidate
-                        break
-            if not isinstance(table, Tag):
-                print(f"Could not find recent section for {kind}.\n")
-                return []
-            return self.parse_rows(table)
+        if not self.client:
+            raise RuntimeError("Client not initialized")
+        resp = await self.client.get(BASE_URL)
+        text = resp.text
+        soup = BeautifulSoup(text, "html.parser")
+        h5_tags = soup.find_all("h5")
+        table: Optional[Tag] = None
+        for h5 in h5_tags:
+            if (
+                h5.text.strip().startswith("Recent")
+                and kind.capitalize() in h5.text
+            ):
+                table_candidate = h5.find_next("tbody")
+                if isinstance(table_candidate, Tag):
+                    table = table_candidate
+                    break
+        if not isinstance(table, Tag):
+            print(f"Could not find recent section for {kind}.\n")
+            return []
+        return self.parse_rows(table)
 
     def parse_table(self, html: str) -> List[Tuple[str, str, str]]:
         soup = BeautifulSoup(html, "html.parser")
@@ -410,34 +423,36 @@ class AudioVaultDownloaderAsync:
     async def download_file(self, url: str, dest_dir: Path) -> bool:
         dest_dir.mkdir(parents=True, exist_ok=True)
         try:
-            async with async_timeout.timeout(300):
-                async with self.session.get(url) as resp:
-                    if resp.status in (302, 401) or "text/html" in resp.headers.get(
-                        "Content-Type", ""
-                    ):
-                        # Session expired or not allowed; retry login (up to 3)
-                        if not self.logged_in:
-                            await self.ensure_login()
-                            return await self.download_file(url, dest_dir)
-                        else:
-                            print("Access error, stopping all downloads.")
-                            raise Exception("Access error, batch stopped")
-                    total = int(resp.headers.get("Content-Length", 0))
-                    filename = (
-                        self.extract_filename(resp)
-                        or Path(url.split("?")[0]).name
-                        or "downloaded_file"
-                    )
-                    destination = dest_dir / filename
-                    with open(destination, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(8192):
-                            if chunk:
-                                f.write(chunk)
-                    print(
-                        f"Saved: {destination} ({bytes2human(total)})"
-                        if total
-                        else f"Saved: {destination}"
-                    )
+            async with asyncio.timeout(300):
+                if not self.client:
+                    raise RuntimeError("Client not initialized")
+                resp = await self.client.get(url)
+                if resp.status_code in (302, 401) or "text/html" in resp.headers.get(
+                    "Content-Type", ""
+                ):
+                    # Session expired or not allowed; retry login (up to 3)
+                    if not self.logged_in:
+                        await self.ensure_login()
+                        return await self.download_file(url, dest_dir)
+                    else:
+                        print("Access error, stopping all downloads.")
+                        raise Exception("Access error, batch stopped")
+                total = int(resp.headers.get("Content-Length", 0))
+                filename = (
+                    self.extract_filename(resp)
+                    or Path(url.split("?")[0]).name
+                    or "downloaded_file"
+                )
+                destination = dest_dir / filename
+                with open(destination, "wb") as f:
+                    async for chunk in resp.aiter_bytes(8192):
+                        if chunk:
+                            f.write(chunk)
+                print(
+                    f"Saved: {destination} ({bytes2human(total)})"
+                    if total
+                    else f"Saved: {destination}"
+                )
             # If it's a zip, could call self.unzip_file(destination, dest_dir)
             return True
         except Exception as e:
@@ -445,7 +460,7 @@ class AudioVaultDownloaderAsync:
             return False
 
     @staticmethod
-    def extract_filename(response: aiohttp.ClientResponse) -> Optional[str]:
+    def extract_filename(response: httpx.Response) -> Optional[str]:
         cd = response.headers.get("Content-Disposition")
         if not cd:
             return None
