@@ -6,7 +6,7 @@ import sys
 import configparser
 import re
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Union
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
@@ -17,6 +17,17 @@ BASE_URL = "https://audiovault.net"
 KEYRING_SERVICE = "audiovault_downloader"
 DOWNLOAD_CONCURRENCY_LIMIT = 5
 DOWNLOAD_RATE_LIMIT_SECONDS = 1.0
+
+
+def find_tag(soup: Union[BeautifulSoup, Tag], *args, **kwargs) -> Optional[Tag]:
+    """Find a tag and return it if it's a Tag instance, None otherwise."""
+    result = soup.find(*args, **kwargs)
+    return result if isinstance(result, Tag) else None
+
+
+def find_all_tags(soup: Union[BeautifulSoup, Tag], *args, **kwargs) -> List[Tag]:
+    """Find all tags and return only Tag instances."""
+    return [el for el in soup.find_all(*args, **kwargs) if isinstance(el, Tag)]
 
 
 def bytes2human(n: int) -> str:
@@ -261,8 +272,8 @@ class AudioVaultDownloaderAsync:
             resp = await self.client.get(f"{BASE_URL}/login")
             text = resp.text
             soup = BeautifulSoup(text, "html.parser")
-            token_tag = soup.find("input", {"name": "_token"})
-            if not isinstance(token_tag, Tag):
+            token_tag = find_tag(soup, "input", {"name": "_token"})
+            if not token_tag:
                 print("Failed to get login token.")
                 return False
             token_value = token_tag.get("value")
@@ -379,7 +390,7 @@ class AudioVaultDownloaderAsync:
         resp = await self.client.get(BASE_URL)
         text = resp.text
         soup = BeautifulSoup(text, "html.parser")
-        h5_tags = soup.find_all("h5")
+        h5_tags = find_all_tags(soup, "h5")
         table: Optional[Tag] = None
         for h5 in h5_tags:
             if (
@@ -397,24 +408,22 @@ class AudioVaultDownloaderAsync:
 
     def parse_table(self, html: str) -> List[Tuple[str, str, str]]:
         soup = BeautifulSoup(html, "html.parser")
-        tbody = soup.find("tbody")
-        if not isinstance(tbody, Tag):
+        tbody = find_tag(soup, "tbody")
+        if not tbody:
             return []
         return self.parse_rows(tbody)
 
     @staticmethod
     def parse_rows(table: Tag) -> List[Tuple[str, str, str]]:
         results: List[Tuple[str, str, str]] = []
-        for row in table.find_all("tr"):
-            if not isinstance(row, Tag):
-                continue
-            cells = row.find_all("td")
-            if len(cells) < 3 or any(not isinstance(cell, Tag) for cell in cells):
+        for row in find_all_tags(table, "tr"):
+            cells = find_all_tags(row, "td")
+            if len(cells) < 3:
                 continue
             id_ = cells[0].get_text(strip=True)
             name = cells[1].get_text(strip=True)
-            link_tag = cells[2].find("a") if isinstance(cells[2], Tag) else None
-            if not (isinstance(link_tag, Tag) and "href" in link_tag.attrs):
+            link_tag = find_tag(cells[2], "a")
+            if not (link_tag and "href" in link_tag.attrs):
                 continue
             link = str(link_tag["href"])
             results.append((id_, name, link))
