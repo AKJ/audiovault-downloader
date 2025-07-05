@@ -102,6 +102,18 @@ class ConfigManager:
 
 
 class AsyncLimiter:
+    """Async context manager for rate limiting operations.
+
+    Ensures a minimum time interval between operations when used as an async context
+    manager. Uses a lock to serialize access and maintains the last call timestamp
+    to enforce the minimum interval.
+
+    Attributes:
+        min_interval_seconds: Minimum time in seconds between operations.
+        _lock: Asyncio lock for thread-safe access to timing state.
+        _last_call: Timestamp of the last operation completion.
+    """
+
     def __init__(self, min_interval_seconds=1.0):
         self.min_interval_seconds = min_interval_seconds
         self._lock = asyncio.Lock()
