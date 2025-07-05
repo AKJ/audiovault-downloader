@@ -13,5 +13,14 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "mypy>=1.16.1",
     "pyinstaller>=6.14.1",
+    "ruff>=0.12.1",
+]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-mock>=3.12.0",
+    "respx>=0.21.0",
+    "pytest-cov>=6.0.0",
 ]
