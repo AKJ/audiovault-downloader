@@ -10,7 +10,7 @@ import tempfile
 import shutil
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any, Union
+from typing import List, Tuple, Dict, Any, Union
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 from tqdm.asyncio import tqdm as tqdm_asyncio
@@ -25,7 +25,7 @@ DOWNLOAD_CONCURRENCY_LIMIT = 5
 DOWNLOAD_RATE_LIMIT_SECONDS = 1.0
 
 
-def find_tag(soup: Union[BeautifulSoup, Tag], *args, **kwargs) -> Optional[Tag]:
+def find_tag(soup: Union[BeautifulSoup, Tag], *args, **kwargs) -> Tag | None:
     """Find a tag and return it if it's a Tag instance, None otherwise."""
     result = soup.find(*args, **kwargs)
     return result if isinstance(result, Tag) else None
@@ -78,7 +78,7 @@ class ConfigManager:
         with self.filename.open("w", encoding="utf-8") as f:
             self.config.write(f)
 
-    def get(self, key: str, default=None) -> Optional[str]:
+    def get(self, key: str, default=None) -> str | None:
         return self.config.get("settings", key, fallback=default)
 
     def set(self, key: str, value) -> None:
@@ -94,7 +94,7 @@ class ConfigManager:
     def set_download_dir(self, dir_path: Path) -> None:
         self.set("download_dir", str(dir_path.expanduser().resolve()))
 
-    def get_email(self) -> Optional[str]:
+    def get_email(self) -> str | None:
         return self.get("email")
 
     def set_email(self, email: str) -> None:
@@ -312,7 +312,7 @@ class ContentParser:
         return results
 
     @staticmethod
-    def find_recent_table(html: str, kind: str) -> Optional[Tag]:
+    def find_recent_table(html: str, kind: str) -> Tag | None:
         """Find recent content table in HTML.
 
         Args:
@@ -332,7 +332,7 @@ class ContentParser:
         return None
 
     @staticmethod
-    def extract_filename(response: httpx.Response) -> Optional[str]:
+    def extract_filename(response: httpx.Response) -> str | None:
         """Extract filename from HTTP response headers.
 
         Args:
@@ -473,8 +473,8 @@ class AudioVaultDownloaderAsync:
 
     def __init__(self):
         self.config = ConfigManager()
-        self.client: Optional[httpx.AsyncClient] = None
-        self.auth: Optional[AudioVaultAuth] = None
+        self.client: httpx.AsyncClient | None = None
+        self.auth: AudioVaultAuth | None = None
         self.content_parser = ContentParser()
 
         self.download_dir = self.config.get_download_dir()
@@ -526,7 +526,7 @@ class AudioVaultDownloaderAsync:
         print(f"\nAudioVault.net Downloader v{VERSION}")
         print(f"All downloads will be stored in: {self.download_dir}")
         print()
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             self.client = client
             self.auth = AudioVaultAuth(self.config, client)
             while True:
