@@ -567,13 +567,19 @@ class AudioVaultDownloaderAsync:
             for idx, opt in enumerate(options, 1):
                 print(f"{idx}. {opt}")
             try:
-                choice = int(input(f"{prompt} [1-{len(options)}]: "))
+                user_input = input(f"{prompt} [1-{len(options)}]: ")
+                if not user_input.strip():
+                    continue
+                choice = int(user_input.strip())
                 if 1 <= choice <= len(options):
                     return choice - 1
             except KeyboardInterrupt:
                 print("\nExiting...")
                 sys.exit(0)
-            except Exception:
+            except EOFError:
+                print("\nNo input available. Exiting...")
+                sys.exit(0)
+            except (ValueError, TypeError):
                 pass
             print("Invalid input, try again.")
 
@@ -616,6 +622,9 @@ class AudioVaultDownloaderAsync:
             await self.choose_and_download(entries, kind=kind)
         except KeyboardInterrupt:
             print("\nSearch cancelled.")
+            return
+        except EOFError:
+            print("\nNo input available. Search cancelled.")
             return
 
     async def handle_recent(self, kind: str) -> None:
