@@ -13,4 +13,4 @@ dist/
 *.spec
 
 # Config files.
-config.yaml
+config.ini

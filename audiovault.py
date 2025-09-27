@@ -526,7 +526,13 @@ class AudioVaultDownloaderAsync:
         print(f"\nAudioVault.net Downloader v{VERSION}")
         print(f"All downloads will be stored in: {self.download_dir}")
         print()
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        timeout_config = httpx.Timeout(
+            connect=30.0,  # 30s to establish connection
+            read=300.0,  # 5 minutes for reading large files
+            write=30.0,  # 30s for writing
+            pool=30.0,  # 30s to acquire connection from pool
+        )
+        async with httpx.AsyncClient(timeout=timeout_config) as client:
             self.client = client
             self.auth = AudioVaultAuth(self.config, client)
             while True:
