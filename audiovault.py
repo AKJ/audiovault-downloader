@@ -21,7 +21,7 @@ DEFAULT_DOWNLOAD_DIR = "downloads"
 VERSION = "1.2-async"
 BASE_URL = "https://audiovault.net"
 KEYRING_SERVICE = "audiovault_downloader"
-DOWNLOAD_CONCURRENCY_LIMIT = 5
+DOWNLOAD_CONCURRENCY_LIMIT = 2
 DOWNLOAD_RATE_LIMIT_SECONDS = 1.0
 
 
@@ -37,6 +37,8 @@ def find_all_tags(soup: Union[BeautifulSoup, Tag], *args, **kwargs) -> List[Tag]
 
 
 def bytes2human(n: int) -> str:
+    if n < 1024:
+        return f"{n}B"
     symbols = ("KB", "MB", "GB", "TB", "PB")
     for i, s in enumerate(symbols):
         power = 1 << ((i + 1) * 10)
@@ -226,10 +228,11 @@ class AudioVaultAuth:
                 return False
             data = {"_token": token_value, "email": email, "password": password}
             resp2 = await self.client.post(f"{BASE_URL}/login", data=data)
-            t = resp2.text
-            if t.startswith("<form method="):
-                return False
-            return True
+            location = resp2.headers.get("Location", "")
+            redirects_to_login = (
+                httpx.URL(location).path.rstrip("/") == "/login" if location else False
+            )
+            return resp2.status_code in (301, 302, 303) and not redirects_to_login
         except Exception as e:
             print("Login error:", e)
             return False
@@ -532,7 +535,10 @@ class AudioVaultDownloaderAsync:
             write=30.0,  # 30s for writing
             pool=30.0,  # 30s to acquire connection from pool
         )
-        async with httpx.AsyncClient(timeout=timeout_config) as client:
+        async with httpx.AsyncClient(
+            timeout=timeout_config,
+            headers={"User-Agent": f"audiovault-downloader/{VERSION}"},
+        ) as client:
             self.client = client
             self.auth = AudioVaultAuth(self.config, client)
             while True:
@@ -736,7 +742,7 @@ class AudioVaultDownloaderAsync:
         failed = [
             t
             for t, (_, name, _) in zip(tasks, targets)
-            if status[name]["status"] == "failed"
+            if str(status[name]["status"]).startswith("failed")
         ]
         if failed:
             print(f"\nFailed downloads: {len(failed)}")
@@ -749,7 +755,7 @@ class AudioVaultDownloaderAsync:
                 return
             if retry_response:
                 for item_id, name, url in targets:
-                    if status[name]["status"] == "failed":
+                    if str(status[name]["status"]).startswith("failed"):
                         await self.download_with_status(
                             url, kind_dir, name, status, kind
                         )
@@ -826,35 +832,81 @@ class AudioVaultDownloaderAsync:
             final_dest_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            async with asyncio.timeout(300):
-                if not self.client:
-                    raise RuntimeError("Client not initialized")
-                resp = await self.client.get(url)
-                if resp.status_code in (302, 401) or "text/html" in resp.headers.get(
-                    "Content-Type", ""
-                ):
-                    # Session expired or not allowed; retry login (up to 3)
-                    if self.auth and not self.auth.logged_in:
-                        await self.auth.ensure_login()
-                        return await self.download_file(
-                            url, dest_dir, is_tv_show, show_name, season_info
-                        )
+            if not self.client:
+                raise RuntimeError("Client not initialized")
+
+            for attempt in range(2):
+                authentication_to_retry: AudioVaultAuth | None = None
+                retry_delay: int | None = None
+
+                async with self.client.stream("GET", url) as resp:
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    if resp.status_code in (302, 401) or "text/html" in content_type:
+                        if attempt == 1 or not self.auth:
+                            print("Access error, stopping download.")
+                            return False, 0
+                        authentication_to_retry = self.auth
+                    elif resp.status_code == 429 or resp.status_code >= 500:
+                        if attempt == 1:
+                            resp.raise_for_status()
+                        retry_after = resp.headers.get("Retry-After", "")
+                        try:
+                            retry_delay = int(retry_after)
+                        except ValueError:
+                            retry_delay = 30
                     else:
-                        print("Access error, stopping all downloads.")
-                        raise Exception("Access error, batch stopped")
-                total = int(resp.headers.get("Content-Length", 0))
+                        resp.raise_for_status()
+                        total = int(resp.headers.get("Content-Length", 0))
 
-                # For TV shows, download to a temporary file first
-                if is_tv_show and show_name and season_info:
-                    with tempfile.NamedTemporaryFile(
-                        delete=False, suffix=".zip"
-                    ) as temp_file:
-                        temp_path = Path(temp_file.name)
+                        # For TV shows, download to a temporary file first
+                        if is_tv_show and show_name and season_info:
+                            with tempfile.NamedTemporaryFile(
+                                delete=False, suffix=".zip"
+                            ) as temp_file:
+                                temp_path = Path(temp_file.name)
 
-                        # Create progress bar for TV show download
-                        desc = f"{show_name} - {season_info}"
+                                # Create progress bar for TV show download
+                                desc = f"{show_name} - {season_info}"
+                                progress_bar = tqdm_asyncio(
+                                    desc=desc,
+                                    total=total,
+                                    unit="B",
+                                    unit_scale=True,
+                                    unit_divisor=1024,
+                                    disable=total == 0,
+                                )
+
+                                bytes_downloaded = 0
+                                async for chunk in resp.aiter_bytes(65536):
+                                    if chunk:
+                                        temp_file.write(chunk)
+                                        bytes_downloaded += len(chunk)
+                                        progress_bar.update(len(chunk))
+
+                                progress_bar.close()
+
+                            # Extract directly to final destination
+                            extraction_success = self.tv_extractor.extract_tv_zip(
+                                temp_path, show_name, season_info
+                            )
+
+                            # Clean up temp file
+                            temp_path.unlink()
+
+                            if not extraction_success:
+                                print("Warning: Failed to extract TV show")
+                                return False, bytes_downloaded
+
+                            return True, bytes_downloaded
+
+                        filename = self.content_parser.extract_filename(resp) or (
+                            f"download_{url.rsplit('/', 1)[-1] or 'file'}"
+                        )
+                        destination = final_dest_dir / filename
+
+                        # Create progress bar for movie download
                         progress_bar = tqdm_asyncio(
-                            desc=desc,
+                            desc=filename,
                             total=total,
                             unit="B",
                             unit_scale=True,
@@ -863,59 +915,27 @@ class AudioVaultDownloaderAsync:
                         )
 
                         bytes_downloaded = 0
-                        async for chunk in resp.aiter_bytes(8192):
-                            if chunk:
-                                temp_file.write(chunk)
-                                bytes_downloaded += len(chunk)
-                                progress_bar.update(len(chunk))
+                        with open(destination, "wb") as destination_file:
+                            async for chunk in resp.aiter_bytes(65536):
+                                if chunk:
+                                    destination_file.write(chunk)
+                                    bytes_downloaded += len(chunk)
+                                    progress_bar.update(len(chunk))
 
                         progress_bar.close()
+                        return True, bytes_downloaded
 
-                    # Extract directly to final destination
-                    extraction_success = self.tv_extractor.extract_tv_zip(
-                        temp_path, show_name, season_info
-                    )
-
-                    # Clean up temp file
-                    temp_path.unlink()
-
-                    if not extraction_success:
-                        print("Warning: Failed to extract TV show")
-                        return False, bytes_downloaded
-
-                    return True, bytes_downloaded
-                else:
-                    # For movies, use the original logic
-                    filename = (
-                        self.content_parser.extract_filename(resp) or "downloaded_file"
-                    )
-                    destination = final_dest_dir / filename
-
-                    # Create progress bar for movie download
-                    progress_bar = tqdm_asyncio(
-                        desc=filename,
-                        total=total,
-                        unit="B",
-                        unit_scale=True,
-                        unit_divisor=1024,
-                        disable=total == 0,
-                    )
-
-                    bytes_downloaded = 0
-                    with open(destination, "wb") as f:
-                        async for chunk in resp.aiter_bytes(8192):
-                            if chunk:
-                                f.write(chunk)
-                                bytes_downloaded += len(chunk)
-                                progress_bar.update(len(chunk))
-
-                    progress_bar.close()
-                    return True, bytes_downloaded
-
-            return True, total or 0
+                if authentication_to_retry:
+                    authentication_to_retry.logged_in = False
+                    await authentication_to_retry.ensure_login()
+                elif retry_delay is not None:
+                    print(f"Server unavailable, retrying in {retry_delay} seconds.")
+                    await asyncio.sleep(retry_delay)
         except Exception as e:
             print(f"Download error for {url}: {e}")
             return False, 0
+
+        return False, 0
 
 
 if __name__ == "__main__":

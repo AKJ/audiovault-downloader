@@ -92,7 +92,7 @@ Comprehensive test suite with pytest:
 
 ## Important Implementation Details
 
-- Downloads are rate-limited (1 second between requests) and concurrent (max 5 simultaneous)
+- Downloads are rate-limited (1 second between requests) and concurrent (max 2 simultaneous)
 - Authentication tokens are extracted from login forms via BeautifulSoup parsing
 - Session management handles expired logins with automatic retry
 - File downloads support resume and proper filename extraction from Content-Disposition headers
@@ -102,15 +102,9 @@ Comprehensive test suite with pytest:
 
 ## Testing
 
-The project includes a comprehensive test suite covering:
-- **Unit tests**: Individual component testing (ConfigManager, ContentParser, TVShowExtractor, etc.)
-- **Integration tests**: End-to-end download workflows
-- **Async testing**: Proper async function testing with pytest-asyncio
-- **Mocking**: HTTP requests, file system operations, and keyring interactions
-- **Progress tracking**: Progress bar functionality and statistics calculation
-- **Error handling**: Network failures, authentication errors, and edge cases
-
-Test files are organized in the `tests/` directory with fixtures and sample data.
+The test suite contains focused unit tests for `ConfigManager` and utility/parsing
+helpers, plus mocked async coverage for download streaming, session re-authentication,
+and HTTP errors. Test files and shared fixtures are organized in the `tests/` directory.
 
 ## Code Style
 

@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 from unittest.mock import patch
 
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for tests."""
@@ -11,13 +12,17 @@ def temp_dir():
     yield temp_dir
     shutil.rmtree(temp_dir)
 
+
 @pytest.fixture
 def mock_keyring():
     """Mock keyring operations."""
-    with patch('keyring.get_password') as get_mock, \
-         patch('keyring.set_password') as set_mock:
+    with (
+        patch("keyring.get_password") as get_mock,
+        patch("keyring.set_password") as set_mock,
+    ):
         get_mock.return_value = "test_password"
-        yield {'get': get_mock, 'set': set_mock}
+        yield {"get": get_mock, "set": set_mock}
+
 
 @pytest.fixture
 def sample_html():
