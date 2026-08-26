@@ -48,6 +48,11 @@ def bytes2human(n: int) -> str:
     return f"{n}B"
 
 
+def sanitize_name(name: str) -> str:
+    """Replace filesystem-invalid characters in a name with underscores."""
+    return re.sub(r'[<>:"/\\|?*]', "_", name)
+
+
 class ConfigManager:
     """Configuration file management for application settings.
 
@@ -95,6 +100,16 @@ class ConfigManager:
 
     def set_download_dir(self, dir_path: Path) -> None:
         self.set("download_dir", str(dir_path.expanduser().resolve()))
+
+    def get_dropbox_dir(self) -> Path | None:
+        dir_path = self.get("dropbox_dir")
+        if not dir_path or not dir_path.strip():
+            return None
+        return Path(dir_path).expanduser().resolve()
+
+    def set_dropbox_dir(self, dir_path: Path | None) -> None:
+        value = str(dir_path.expanduser().resolve()) if dir_path else ""
+        self.set("dropbox_dir", value)
 
     def get_email(self) -> str | None:
         return self.get("email")
@@ -412,8 +427,8 @@ class TVShowExtractor:
         """
         try:
             # Sanitize directory name
-            safe_show_name = re.sub(r'[<>:"/\\|?*]', "_", show_name)
-            safe_season = re.sub(r'[<>:"/\\|?*]', "_", season)
+            safe_show_name = sanitize_name(show_name)
+            safe_season = sanitize_name(season)
             season_dir = self.tv_dir / f"{safe_show_name} - {safe_season}"
 
             # Create season directory
@@ -590,33 +605,73 @@ class AudioVaultDownloaderAsync:
             print("Invalid input, try again.")
 
     def change_settings(self) -> None:
-        try:
-            print("\nSettings:")
-            print(f"Current download directory: {self.download_dir}")
-            print(f"Current email: {self.config.get_email() or '(none)'}")
-            print("Leave blank to keep current value.")
-            download_directory = input("New download directory: ").strip()
-            if download_directory:
-                self.download_dir = Path(download_directory).expanduser().resolve()
-                self.config.set_download_dir(self.download_dir)
-                self.movies_dir = self.download_dir / "movies"
-                self.tv_dir = self.download_dir / "tv"
-                self.check_and_prepare_dirs()
-            email_address = input("New email address: ").strip()
-            if email_address:
-                self.config.set_email(email_address)
-            # Password change logic
-            if (email_address or self.config.get_email()) and input(
-                "Update password? (y/N): "
-            ).strip().lower() == "y":
-                if self.auth:
-                    self.auth.set_password_interactively(
-                        self.config.get_email() or email_address
-                    )
-            print("Settings saved.\n")
-        except KeyboardInterrupt:
-            print("\nSettings change cancelled.")
+        while True:
+            choice = self.show_menu(
+                "Choose a setting to change:",
+                [
+                    f"Download directory ({self.download_dir})",
+                    f"Email ({self.config.get_email() or 'none'})",
+                    "Password",
+                    f"Dropbox folder ({self.config.get_dropbox_dir() or 'not set'})",
+                    "Back to main menu",
+                ],
+            )
+            try:
+                if choice == 0:
+                    self.change_download_dir()
+                elif choice == 1:
+                    self.change_email()
+                elif choice == 2:
+                    self.change_password()
+                elif choice == 3:
+                    self.change_dropbox_dir()
+                elif choice == 4:
+                    return
+            except KeyboardInterrupt:
+                print("\nChange cancelled.")
+
+    def change_download_dir(self) -> None:
+        download_directory = input("New download directory (blank to cancel): ").strip()
+        if not download_directory:
             return
+        self.download_dir = Path(download_directory).expanduser().resolve()
+        self.config.set_download_dir(self.download_dir)
+        self.movies_dir = self.download_dir / "movies"
+        self.tv_dir = self.download_dir / "tv"
+        self.check_and_prepare_dirs()
+        print(f"Download directory set to: {self.download_dir}")
+
+    def change_email(self) -> None:
+        email_address = input("New email address (blank to cancel): ").strip()
+        if not email_address:
+            return
+        self.config.set_email(email_address)
+        print(f"Email set to: {email_address}")
+
+    def change_password(self) -> None:
+        email_address = self.config.get_email()
+        if not email_address:
+            print("Set an email address first.")
+            return
+        if self.auth:
+            self.auth.set_password_interactively(email_address)
+
+    def change_dropbox_dir(self) -> None:
+        dropbox_input = input(
+            "New Dropbox folder ('-' to disable, blank to cancel): "
+        ).strip()
+        if not dropbox_input:
+            return
+        if dropbox_input == "-":
+            self.config.set_dropbox_dir(None)
+            print("Dropbox copying disabled.")
+            return
+        dropbox_path = Path(dropbox_input).expanduser().resolve()
+        if dropbox_path.is_dir():
+            self.config.set_dropbox_dir(dropbox_path)
+            print(f"Dropbox folder set to: {dropbox_path}")
+        else:
+            print(f"Folder does not exist: {dropbox_path}. Dropbox folder not changed.")
 
     async def handle_search(self, kind: str) -> None:
         try:
@@ -671,6 +726,24 @@ class AudioVaultDownloaderAsync:
         if self.auth:
             await self.auth.ensure_login()
 
+        dropbox_copy_dir = None
+        dropbox_dir = self.config.get_dropbox_dir()
+        if dropbox_dir:
+            try:
+                copy_to_dropbox = (
+                    input("Copy finished downloads to your Dropbox folder? (y/N): ")
+                    .strip()
+                    .lower()
+                    == "y"
+                )
+            except KeyboardInterrupt:
+                print("\nDropbox copy skipped.")
+                copy_to_dropbox = False
+            if copy_to_dropbox:
+                dropbox_copy_dir = dropbox_dir / (
+                    "movies" if kind == "movies" else "tv"
+                )
+
         # Prepare tasks
         kind_dir = self.movies_dir if kind == "movies" else self.tv_dir
         status: Dict[str, Dict[str, Any]] = {
@@ -680,7 +753,14 @@ class AudioVaultDownloaderAsync:
         tasks = []
         for id, name, url in targets:
             task = asyncio.create_task(
-                self.download_with_status(url, kind_dir, name, status, kind)
+                self.download_with_status(
+                    url,
+                    kind_dir,
+                    name,
+                    status,
+                    kind,
+                    dropbox_copy_dir=dropbox_copy_dir,
+                )
             )
             tasks.append(task)
 
@@ -757,11 +837,22 @@ class AudioVaultDownloaderAsync:
                 for item_id, name, url in targets:
                     if str(status[name]["status"]).startswith("failed"):
                         await self.download_with_status(
-                            url, kind_dir, name, status, kind
+                            url,
+                            kind_dir,
+                            name,
+                            status,
+                            kind,
+                            dropbox_copy_dir=dropbox_copy_dir,
                         )
 
     async def download_with_status(
-        self, url, dest_dir, name, status_dict, kind="movies"
+        self,
+        url,
+        dest_dir,
+        name,
+        status_dict,
+        kind="movies",
+        dropbox_copy_dir: Path | None = None,
     ):
         status_dict[name]["status"] = "downloading"
         start_time = time.time()
@@ -777,9 +868,12 @@ class AudioVaultDownloaderAsync:
                             is_tv_show=True,
                             show_name=show_name,
                             season_info=season,
+                            dropbox_copy_dir=dropbox_copy_dir,
                         )
                     else:
-                        ok, file_size = await self.download_file(url, dest_dir)
+                        ok, file_size = await self.download_file(
+                            url, dest_dir, dropbox_copy_dir=dropbox_copy_dir
+                        )
 
                     end_time = time.time()
                     duration = end_time - start_time
@@ -813,6 +907,24 @@ class AudioVaultDownloaderAsync:
             return []
         return self.content_parser.parse_rows(table)  # type: ignore[no-any-return]
 
+    async def copy_to_dropbox(
+        self, source: Path, dropbox_copy_dir: Path, target_name: str
+    ) -> None:
+        """Copy a finished download into the configured Dropbox folder.
+
+        Args:
+            source: Path to the completed local download.
+            dropbox_copy_dir: Dropbox subdirectory for the content type.
+            target_name: Filename to use for the copied download.
+        """
+        try:
+            dropbox_copy_dir.mkdir(parents=True, exist_ok=True)
+            target_path = dropbox_copy_dir / target_name
+            await asyncio.to_thread(shutil.copy2, source, target_path)
+            print(f"Copied to Dropbox: {target_path}")
+        except Exception as e:
+            print(f"Dropbox copy failed for {target_name}: {e}")
+
     async def download_file(
         self,
         url: str,
@@ -820,11 +932,12 @@ class AudioVaultDownloaderAsync:
         is_tv_show: bool = False,
         show_name: str = "",
         season_info: str = "",
+        dropbox_copy_dir: Path | None = None,
     ) -> Tuple[bool, int]:
         # For TV shows, create the show-specific directory structure
         if is_tv_show and show_name and season_info:
-            safe_show_name = re.sub(r'[<>:"/\\|?*]', "_", show_name)
-            safe_season = re.sub(r'[<>:"/\\|?*]', "_", season_info)
+            safe_show_name = sanitize_name(show_name)
+            safe_season = sanitize_name(season_info)
             final_dest_dir = dest_dir / f"{safe_show_name} - {safe_season}"
             final_dest_dir.mkdir(parents=True, exist_ok=True)
         else:
@@ -890,6 +1003,14 @@ class AudioVaultDownloaderAsync:
                                 temp_path, show_name, season_info
                             )
 
+                            if extraction_success and dropbox_copy_dir:
+                                await self.copy_to_dropbox(
+                                    temp_path,
+                                    dropbox_copy_dir,
+                                    f"{sanitize_name(show_name)} - "
+                                    f"{sanitize_name(season_info)}.zip",
+                                )
+
                             # Clean up temp file
                             temp_path.unlink()
 
@@ -923,6 +1044,10 @@ class AudioVaultDownloaderAsync:
                                     progress_bar.update(len(chunk))
 
                         progress_bar.close()
+                        if dropbox_copy_dir:
+                            await self.copy_to_dropbox(
+                                destination, dropbox_copy_dir, filename
+                            )
                         return True, bytes_downloaded
 
                 if authentication_to_retry:

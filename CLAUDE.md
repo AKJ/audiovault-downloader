@@ -80,6 +80,7 @@ Comprehensive test suite with pytest:
 ## Configuration
 
 - `config.ini`: User settings (download directory, email) in INI format
+- Optional `dropbox_dir`: Copies finished downloads into `movies/` and `tv/` subfolders
 - System keyring: Secure password storage
 - Default download structure: `downloads/movies/` and `downloads/tv/`
 
